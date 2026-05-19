@@ -312,7 +312,7 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
         X_train_texts = X_train_full.tolist(),
         y_train       = y_train.tolist(),
         vocab         = vocab,
-        epochs        = 15,
+        epochs        = 50,
         batch_size    = 64,
     )
     era_results.append(_eval(y_test, predict_lstm(lstm_model, X_test_full.tolist(), vocab),
@@ -351,7 +351,7 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
     bert_model, bert_tokenizer = train_bert(
         X_train_texts = X_bert_train,
         y_train       = y_bert_train,
-        epochs        = 3,
+        epochs        = 10,
         batch_size    = 16,
     )
     era_results.append(_eval(y_test, predict_bert(bert_model, bert_tokenizer,
