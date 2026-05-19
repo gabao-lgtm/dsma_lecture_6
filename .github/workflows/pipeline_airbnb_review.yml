@@ -1,0 +1,145 @@
+# Airbnb NYC Reviews — NLP Evolution Pipeline CI/CD
+# ===================================================
+#
+# Automates the full 5-era NLP pipeline so that any change to a module,
+# the orchestration script, or the raw data triggers a reproducible run
+# that is fully logged to W&B.
+#
+# Triggers
+# --------
+#   workflow_dispatch — manual "Run workflow" button in GitHub Actions UI
+#   push to main      — runs when NLP modules, pipeline, or requirements change
+#
+# Jobs
+# ----
+#   run-nlp-pipeline       → Steps 1–10: all 5 NLP eras + era comparison + embedding drift
+#   notify-on-drift        → conditional notification if embedding drift is detected
+#
+# Setup required
+# --------------
+#   1. Add WANDB_API_KEY to your repository Secrets
+#      (Settings → Secrets and variables → Actions → New repository secret)
+#   2. Add ANTHROPIC_API_KEY to your repository Secrets
+#      (used by the LLM era — Era 5)
+#   3. Place data files in data/raw/airbnb/:
+#        reviews.rar    — compressed guest reviews CSV
+#        listings.csv   — listing metadata with aggregate review scores
+#      For large files, replace the checkout step with a cloud-fetch step
+#      (e.g. download from S3 / GCS using the relevant provider action).
+#
+# Runtime note
+# ------------
+#   BERT fine-tuning on ubuntu-latest (CPU) takes ~30–60 min for 2 000 samples.
+#   The LLM era is fast but makes ~200 API calls (100 zero-shot + 100 few-shot).
+#   Adjust BERT_TRAIN_SIZE and LLM_EVAL_SIZE in pipeline_airbnb_review.py
+#   to trade accuracy for speed if CI time is a concern.
+
+name: NLP Pipeline — Airbnb Reviews
+
+on:
+  workflow_dispatch:
+    inputs:
+      wandb_project:
+        description: 'W&B project name to log runs into'
+        required: false
+        default: 'dsma-lecture6-nlp'
+      reason:
+        description: 'Reason for running'
+        required: false
+        default: 'Manual trigger'
+  push:
+    branches: [main]
+    paths:
+      - "src/unstruc/text/**.py"      # NLP modules changed
+      - "pipeline_airbnb_review.py"   # orchestration changed
+      - "requirements.txt"            # dependency changed
+      - "data/raw/airbnb/**"          # data changed
+
+jobs:
+
+  # ── Job 1: Full NLP pipeline ─────────────────────────────────────────────────
+  run-nlp-pipeline:
+    name: Run NLP evolution pipeline (5 eras)
+    runs-on: ubuntu-latest
+
+    env:
+      WANDB_API_KEY:     ${{ secrets.WANDB_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install unrar (required by rarfile for RAR extraction)
+        run: sudo apt-get install -y unrar
+
+      - name: Download NLTK data
+        run: |
+          python -c "
+          import nltk
+          nltk.download('punkt')
+          nltk.download('punkt_tab')
+          nltk.download('stopwords')
+          nltk.download('wordnet')
+          "
+
+      - name: Run NLP pipeline
+        run: python pipeline_airbnb_review.py --wandb-project "${{ inputs.wandb_project || 'dsma-lecture6-nlp' }}"
+
+      - name: Upload pipeline outputs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nlp-pipeline-outputs-${{ github.run_id }}
+          path: |
+            outputs/
+            models/nlp/lstm.pt
+
+      - name: Check if embedding drift report was produced
+        id: drift-check
+        run: |
+          if [ -f "outputs/embedding_drift_report.html" ]; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+          else
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+          fi
+
+    outputs:
+      drift_detected: ${{ steps.drift-check.outputs.drift_detected }}
+
+  # ── Job 2: Notify on embedding drift ─────────────────────────────────────────
+  # Runs only when the pipeline produced an embedding drift report.
+  # Replace the echo with a Slack / email webhook call in production.
+  notify-on-drift:
+    name: Notify on embedding drift detected
+    needs: run-nlp-pipeline
+    runs-on: ubuntu-latest
+    if: needs.run-nlp-pipeline.outputs.drift_detected == 'true'
+
+    steps:
+      - name: Download pipeline outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: nlp-pipeline-outputs-${{ github.run_id }}
+
+      - name: Send drift alert
+        run: |
+          echo "========================================================"
+          echo "  EMBEDDING DRIFT DETECTED in Airbnb NLP pipeline"
+          echo "  The BERT representation space has shifted."
+          echo "  Check the W&B project for full era comparison metrics."
+          echo "  Embedding drift report is in the Actions artifacts."
+          echo "========================================================"
+          # Production example:
+          # curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+          #   -H "Content-type: application/json" \
+          #   --data '{"text": "Embedding drift detected in Airbnb NLP pipeline. Check W&B."}'
