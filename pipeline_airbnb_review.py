@@ -198,8 +198,18 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
     print("  Full preprocessing (Eras 1–3): clean → tokenise → stopwords → lemmatise ...")
     df["text_full"] = preprocess_series(df["comments"], mode="full")
 
-    print("  Minimal preprocessing (BERT):  clean only — BERT handles its own tokenisation ...")
+    print("  Minimal preprocessing (BERT / LLM): clean only — model handles its own tokenisation ...")
     df["text_bert"] = preprocess_series(df["comments"], mode="minimal")
+
+    # Drop rows where full preprocessing produced an empty string — this happens
+    # when a review consists entirely of stopwords or non-alphabetic characters.
+    # Filtering here keeps all downstream steps, including the LLM API, free of
+    # empty-content errors.
+    before = len(df)
+    df = df[df["text_full"].str.strip() != ""].reset_index(drop=True)
+    dropped = before - len(df)
+    if dropped:
+        print(f"  Dropped {dropped} reviews with empty text after preprocessing.")
 
     print(f"\n  Sample raw     : {df['comments'].iloc[0][:120]}")
     print(f"  Sample full    : {df['text_full'].iloc[0][:120]}")
@@ -302,7 +312,7 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
         X_train_texts = X_train_full.tolist(),
         y_train       = y_train.tolist(),
         vocab         = vocab,
-        epochs        = 3,
+        epochs        = 15,
         batch_size    = 64,
     )
     era_results.append(_eval(y_test, predict_lstm(lstm_model, X_test_full.tolist(), vocab),
@@ -341,7 +351,7 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
     bert_model, bert_tokenizer = train_bert(
         X_train_texts = X_bert_train,
         y_train       = y_bert_train,
-        epochs        = 2,
+        epochs        = 3,
         batch_size    = 16,
     )
     era_results.append(_eval(y_test, predict_bert(bert_model, bert_tokenizer,
@@ -368,13 +378,15 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
 
     _print_header("STEP 8 — Era 5: Foundation Models (LLM — zero-shot & few-shot)")
 
-    llm_idx = rng.choice(len(X_test_full), LLM_EVAL_SIZE, replace=False)
-    X_llm   = X_test_full.iloc[llm_idx].tolist()
+    # LLMs understand natural language — use minimally cleaned text, not the
+    # lemmatized/stopword-removed version sent to statistical and LSTM models.
+    llm_idx = rng.choice(len(X_test_bert), LLM_EVAL_SIZE, replace=False)
+    X_llm   = X_test_bert.iloc[llm_idx].tolist()
     y_llm   = y_test.iloc[llm_idx].tolist()
 
     # Few-shot examples: 2 positive + 1 negative from training set
-    pos_texts = X_train_full[y_train == 1].iloc[:2].tolist()
-    neg_texts = X_train_full[y_train == 0].iloc[:1].tolist()
+    pos_texts = X_train_bert[y_train == 1].iloc[:2].tolist()
+    neg_texts = X_train_bert[y_train == 0].iloc[:1].tolist()
     few_shot_examples = (
         [{"text": t, "label": 1} for t in pos_texts] +
         [{"text": t, "label": 0} for t in neg_texts]
