@@ -89,10 +89,12 @@ PLOTS_DIR     = "outputs/plots"
 #                 2 000 samples × 2 epochs ≈ 5–10 min on CPU, ~1 min on GPU.
 # LLM_EVAL_SIZE   controls API call count — keep small to manage cost.
 
-SAMPLE_SIZE     = 20_000
-BERT_TRAIN_SIZE = 2_000
+POSITIVE_THRESHOLD  = 4.7   # listing score ≥ this → positive (clearly good)
+NEGATIVE_THRESHOLD  = 3.5   # listing score ≤ this → negative (clearly bad)
+MAX_POSITIVE_SAMPLES = 2_000 # undersample majority class; keep all negatives
+# Reviews from listings scoring between 3.5–4.7 are dropped — ambiguous signal.
+BERT_TRAIN_SIZE = 200
 LLM_EVAL_SIZE   = 100
-LABEL_THRESHOLD = 4.0    # review_scores_rating ≥ this → positive (scale: 0–5)
 RANDOM_STATE    = 42
 
 # ── W&B configuration ─────────────────────────────────────────────────────────
@@ -166,13 +168,29 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
     listings_slim = listings_df.rename(columns={"id": "listing_id"})
     df = reviews_df.merge(listings_slim, on="listing_id", how="inner")
     df = df.dropna(subset=["comments", "review_scores_rating"]).reset_index(drop=True)
-    df["label"] = (df["review_scores_rating"] >= LABEL_THRESHOLD).astype(int)
-    df = df.sample(SAMPLE_SIZE, random_state=RANDOM_STATE).reset_index(drop=True)
+
+    # Confidence-based labelling: drop the ambiguous middle band (3.5–4.7).
+    # Keeps only reviews whose listing score is clearly positive or clearly
+    # negative, giving every era a cleaner learning signal.
+    df_pos = df[df["review_scores_rating"] >= POSITIVE_THRESHOLD].copy()
+    df_neg = df[df["review_scores_rating"] <= NEGATIVE_THRESHOLD].copy()
+    df_pos["label"] = 1
+    df_neg["label"] = 0
+
+    # Undersample the majority (positive) class; keep all negatives.
+    df_pos = df_pos.sample(
+        min(MAX_POSITIVE_SAMPLES, len(df_pos)), random_state=RANDOM_STATE
+    )
+    df = (
+        pd.concat([df_pos, df_neg], ignore_index=True)
+        .sample(frac=1, random_state=RANDOM_STATE)
+        .reset_index(drop=True)
+    )
 
     pos_pct = df["label"].mean() * 100
-    print(f"  Loaded     : {len(df):,} reviews")
-    print(f"  Positive   : {pos_pct:.1f}%   Negative: {100 - pos_pct:.1f}%")
-    print(f"  Threshold  : review_scores_rating ≥ {LABEL_THRESHOLD} → positive")
+    print(f"  Positive   : {df['label'].sum():,} reviews  (score ≥ {POSITIVE_THRESHOLD}, capped at {MAX_POSITIVE_SAMPLES:,})")
+    print(f"  Negative   : {(df['label'] == 0).sum():,} reviews  (score ≤ {NEGATIVE_THRESHOLD}, all kept)")
+    print(f"  Total      : {len(df):,}   class split: {pos_pct:.1f}% / {100 - pos_pct:.1f}%")
 
     # ── Step 2: Text Preprocessing ─────────────────────────────────────────────
     _print_header("STEP 2 — Text Preprocessing")
@@ -380,10 +398,11 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
         run_name = "nlp-era-comparison",
         tags     = ["nlp", "airbnb", "era-comparison"],
         config   = {
-            "sample_size":      SAMPLE_SIZE,
-            "bert_train_size":  BERT_TRAIN_SIZE,
-            "llm_eval_size":    LLM_EVAL_SIZE,
-            "label_threshold":  LABEL_THRESHOLD,
+            "max_positive_samples": MAX_POSITIVE_SAMPLES,
+            "bert_train_size":      BERT_TRAIN_SIZE,
+            "llm_eval_size":        LLM_EVAL_SIZE,
+            "positive_threshold":   POSITIVE_THRESHOLD,
+            "negative_threshold":   NEGATIVE_THRESHOLD,
         },
     )
     summary = {}
