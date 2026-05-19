@@ -1,22 +1,22 @@
 """
-Airbnb NYC Reviews — NLP Evolution Pipeline
-============================================
+Airbnb NYC Reviews — Natural Language Processing Evolution Pipeline
+====================================================================
 
 This pipeline tells the story of how NLP has evolved by solving the same
-problem — guest review sentiment classification — with progressively more
+problem — Airbnb guest review sentiment classification — with progressively more
 powerful techniques.  Every era runs on the same dataset and produces the
-same output shape so the accuracy comparison in Step 9 is a clean apples-
-to-apples measure of how far the field has come.
+same output shape so the performance comparison in Step 9 clearly showcases 
+how far the field has evolved.
 
   Step 1   — Data Loading & Label Generation
              Join reviews.csv + listings.csv on listing_id.
-             Threshold review_scores_rating ≥ 4.0 → positive label.
+             Threshold review_scores_rating > 4.7 → positive label and < 3.5 → negative label.
 
   Step 2   — Text Preprocessing
              Full pipeline (clean → tokenise → stopwords → lemmatise) for
-             Eras 1–3.  Minimal cleaning for BERT.  Raw text for LLM.
+             Eras 1–3.  Minimal cleaning for BERT and LLM.
 
-  Step 3   — Train / Test Split  (stratified 80 / 20)
+  Step 3   — Train / Test Split  (stratified 80 / 20 with undersampling of the majority class)
 
   Step 4   — Era 1: Statistical  (Bag-of-Words → TF-IDF)
              Words as count / frequency vectors.  Breaking point: sparsity,
@@ -37,7 +37,7 @@ to-apples measure of how far the field has come.
 
   Step 8   — Era 5: Foundation Models  (LLM — zero-shot & few-shot)
              Scaling unlocks emergent abilities.  No task-specific training
-             required; three examples outperform hours of LSTM fine-tuning.
+             required; five examples outperform hours of LSTM fine-tuning.
 
   Step 9   — Era Comparison Table  (accuracy + F1 across all eras)
 
@@ -59,7 +59,7 @@ import rarfile
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.model_selection import train_test_split
 import torch
 
@@ -132,17 +132,19 @@ def _print_header(title: str):
 
 
 def _eval(y_true, y_pred, name: str) -> dict:
-    acc = accuracy_score(y_true, y_pred)
-    f1  = f1_score(y_true, y_pred, average="binary")
-    print(f"  {name:<40}  Accuracy: {acc:.4f}   F1: {f1:.4f}")
-    return {"name": name, "accuracy": acc, "f1": f1}
+    acc          = accuracy_score(y_true, y_pred)
+    f1           = f1_score(y_true, y_pred, average="binary")
+    tn, fp, _, _ = confusion_matrix(y_true, y_pred).ravel()
+    tnr          = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    print(f"  {name:<40}  Accuracy: {acc:.4f}   F1: {f1:.4f}   TNR: {tnr:.4f}")
+    return {"name": name, "accuracy": acc, "f1": f1, "tnr": tnr}
 
 
 def _era_comparison_table(results: list[dict]):
-    print(f"\n  {'Era / Method':<40} {'Accuracy':>10} {'F1 Score':>10}")
-    print("  " + "-" * 63)
+    print(f"\n  {'Era / Method':<40} {'Accuracy':>10} {'F1 Score':>10} {'TNR':>8}")
+    print("  " + "-" * 72)
     for r in results:
-        print(f"  {r['name']:<40} {r['accuracy']:>10.4f} {r['f1']:>10.4f}")
+        print(f"  {r['name']:<40} {r['accuracy']:>10.4f} {r['f1']:>10.4f} {r['tnr']:>8.4f}")
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -385,8 +387,8 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
     y_llm   = y_test.iloc[llm_idx].tolist()
 
     # Few-shot examples: 2 positive + 1 negative from training set
-    pos_texts = X_train_bert[y_train == 1].iloc[:2].tolist()
-    neg_texts = X_train_bert[y_train == 0].iloc[:1].tolist()
+    pos_texts = X_train_bert[y_train == 1].iloc[:5].tolist()
+    neg_texts = X_train_bert[y_train == 0].iloc[:5].tolist()
     few_shot_examples = (
         [{"text": t, "label": 1} for t in pos_texts] +
         [{"text": t, "label": 0} for t in neg_texts]
@@ -402,7 +404,6 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
 
     # ── Step 9: Era Comparison Table ────────────────────────────────────────────
     _print_header("STEP 9 — Era Comparison: The NLP Evolution")
-    print("\n  Same dataset.  Same problem.  Five generations of solutions.\n")
     _era_comparison_table(era_results)
 
     tracker = ExperimentTracker(
@@ -422,6 +423,7 @@ def run_pipeline(wandb_project: str = WANDB_PROJECT):
         key = r["name"].lower().replace(" ", "_").replace("/", "_").replace("(", "").replace(")", "")
         summary[f"{key}_accuracy"] = r["accuracy"]
         summary[f"{key}_f1"]       = r["f1"]
+        summary[f"{key}_tnr"]      = r["tnr"]
     tracker.log_summary(summary)
     url = tracker.finish()
     print(f"\n  W&B run logged → {url}")
